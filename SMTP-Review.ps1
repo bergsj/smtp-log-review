@@ -1,6 +1,8 @@
 param (
-    [string] $LogFilePath = "C:\Program Files\Microsoft\Exchange Server\V15\TransportRoles\Logs\FrontEnd\ProtocolLog\SmtpReceive\*.log",
+    [string] $LogFilePath = "D:\Program Files\Microsoft\Exchange Server\V15\TransportRoles\Logs\FrontEnd\ProtocolLog\SmtpReceive\*.log",
     [string] $OutputFile = ".\SMTP-Review-IPaddressesUsingConnectors.json",
+    [ValidateSet("Json","Csv")]
+    [string] $OutputType = "Json",
     [switch] $ReverseLookup
 )
 
@@ -29,17 +31,25 @@ foreach ($content in $filecontents){
     $datasource | ForEach-Object {
             
             $connectorName = $_.Name
-            $ipData = $_.Group."remote-endpoint" | ConvertFrom-Csv -Delimiter ":" -Header 'Host','Port' | Group-Object Host | Select Name, Count
+            
+            # Without filtering on only success emails
+            # $ipData = $_.Group."remote-endpoint" | ConvertFrom-Csv -Delimiter ":" -Header 'Host','Port' | Group-Object Host | Select Name, Count
+            
+            # With filtering on success emails
+            $searchString = "250 2.1.5 Recipient OK"
+            $ipData = $_.Group | Group-Object session-id | ForEach-Object { $_.Group | ForEach-Object { if ($_.data -match $searchString){ $_."remote-endpoint" } } } | ConvertFrom-Csv -Delimiter ":" -Header 'Host','Port' | Group-Object Host | Select-Object Name, Count
 
             # Try to find the current connector in the output datasource
             $connector = $data | Where-Object ConnectorName -eq $connectorName
             
             if (-not $connector){
                 # If this is the first time we see this connector in the output datasource, add the entire object including the IP address data
+                $arrayObject = @()
+                $arrayObject += $ipData
 
                 $data += @([pscustomobject]@{
                                 ConnectorName = $connectorName;
-                                IpData = $ipData
+                                IpData = $arrayObject
                             })
             }
             else{
@@ -67,10 +77,13 @@ foreach ($content in $filecontents){
 }
 
 # Convert the output data object to JSON and save to file
-$data | ConvertTo-Json -Depth 10 | Out-File -FilePath $OutputFile
+# $data | ConvertTo-Json -Depth 10 | Out-File -FilePath $OutputFile
 
+# Convert the output data object to CSV and save to file
+$data | ForEach-Object { $connectorName = $_.ConnectorName; $_.IpData | Select-Object @{Name = 'ConnectorName'; Expression = {$connectorName}},Name,Count } | Export-CSV -NoTypeInformation -Path $OutputFile
 
 # If parameter ReverseLookup is used, perform DNS reverse lookup on all IP addresses
+
 if ($ReverseLookup){
 
     $int = 0
