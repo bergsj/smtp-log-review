@@ -1,13 +1,33 @@
+<#
+.SYNOPSIS
+    This script reviews SMTP log files and extracts IP addresses from the logs.
+.DESCRIPTION
+    This script reviews SMTP log files and extracts IP addresses from the logs. 
+    It groups the data by SMTP connector and counts the occurrences of each IP address.
+    The results can be exported to a JSON or CSV file. Additionally, it can perform a 
+    reverse DNS lookup on the IP addresses if specified.
+.LINK
+    https://github.com/bergsj/smtp-log-review
+.EXAMPLE
+    .\SMTP-Review.ps1 -LogFilePath "C:\Program Files\Microsoft\Exchange Server\V15\TransportRoles\Logs\FrontEnd\ProtocolLog\SmtpReceive\*.log" -OutputFile ".\SMTP-Review-IPaddressesUsingConnectors.json" -OutputType "Json" -ReverseLookup
+    This example runs the script with the specified log file path, output file, and performs a reverse DNS lookup on the IP addresses.
+.EXAMPLE
+    .\SMTP-Review.ps1 -LogFilePath "C:\Program Files\Microsoft\Exchange Server\V15\TransportRoles\Logs\FrontEnd\ProtocolLog\SmtpReceive\*.log" -OutputFile ".\SMTP-Review-IPaddressesUsingConnectors.csv" -OutputType "Csv"
+    This example runs the script with the specified log file path and output file, and exports the results to a CSV file.
+#>
+
 param (
-    [string] $LogFilePath = "D:\Program Files\Microsoft\Exchange Server\V15\TransportRoles\Logs\FrontEnd\ProtocolLog\SmtpReceive\*.log",
+    [string] $LogFilePath = "C:\Program Files\Microsoft\Exchange Server\V15\TransportRoles\Logs\FrontEnd\ProtocolLog\SmtpReceive\*.log",
     [string] $OutputFile = ".\SMTP-Review-IPaddressesUsingConnectors.json",
     [ValidateSet("Json","Csv")]
     [string] $OutputType = "Json",
-    [switch] $ReverseLookup
+    [switch] $ReverseLookup,
+    [switch] $ExportRelayCsv
 )
 
 # Initalize variables
 $data = @()
+$relayEntries = @()
 $int = 0
 
 # Retrieve the logfiles from the LogFilePath variable and count them
@@ -18,13 +38,13 @@ $count = @($logfiles).count
 $filecontents = Get-Content $LogFiles -ReadCount 0
 foreach ($content in $filecontents){
 
-	$int = $int + 1
-	$Percent = $int/$count * 100
+	$int++
+	$Percent = $int / $count * 100
 	Write-Progress -Activity "Collecting Log details" -Status "Processing log File $int of $count" -PercentComplete $Percent 
 
-    # Remove the first 4 lines of commentary, remove the hash from the header line, convert the log to CSV in memory and group them by SMTP connector
+    # Remove the first 4 lines of commentary, remove the text '#Fields: ' from the header line, convert the log to CSV in memory and group them by SMTP connector
     $FileContent = $content | Select-Object -Skip 4
-    $FileContent[0] = $FileContent[0].Replace("#","")
+    $FileContent[0] = $FileContent[0].Replace("#Fields: ","")
     $datasource = $FileContent | ConvertFrom-Csv -Delimiter "," | Group-Object connector-id
 
     # Loop through all SMTP connector data blocks
@@ -37,7 +57,22 @@ foreach ($content in $filecontents){
             
             # With filtering on success emails
             $searchString = "250 2.1.5 Recipient OK"
-            $ipData = $_.Group | Group-Object session-id | ForEach-Object { $_.Group | ForEach-Object { if ($_.data -match $searchString){ $_."remote-endpoint" } } } | ConvertFrom-Csv -Delimiter ":" -Header 'Host','Port' | Group-Object Host | Select-Object Name, Count
+
+            $ipData = $_.Group | Group-Object session-id | ForEach-Object {
+            $_.Group | ForEach-Object {
+                if ($_.data -match $searchString) {
+                    # Collect relay entry details
+                    if ($ExportRelayCsv) {
+                        $relayEntries += [pscustomobject]@{
+                            SourceIP = ($_.“remote-endpoint” -split ":")[0]
+                            # Recipient = $_."recipient-address" This does not exist as column, but we need to fetch this from the session
+                            DateTime = [datetime]::Parse($_."date-time").ToString("dd-MM-yyyy HH:mm:ss")
+                        }
+                    }
+                    $_."remote-endpoint"
+                }
+            }
+        } | ConvertFrom-Csv -Delimiter ":" -Header 'Host','Port' | Group-Object Host | Select-Object Name, Count
 
             # Try to find the current connector in the output datasource
             $connector = $data | Where-Object ConnectorName -eq $connectorName
@@ -109,4 +144,11 @@ if ($ReverseLookup){
     $extention = (".{0}" -f (Split-Path $OutputFile -Leaf).Split(".")[1]) # (Split-Path $OutputFile -Extension)  -Extension not available in PowerShell 5.1
     $dnsnames  | ConvertTo-Json | Out-File -FilePath ("{0}\{1}-dns{2}" -f (Split-Path $OutputFile -Parent), $leafBase, $extention)
 
+}
+
+# Export relay entries if switch is used
+if ($ExportRelayCsv -and $relayEntries.Count -gt 0) {
+    $csvPath = [System.IO.Path]::ChangeExtension($OutputFile, "relay.csv")
+    $relayEntries | Export-Csv -NoTypeInformation -Path $csvPath
+    Write-Host "Relay entries exported to $csvPath"
 }
